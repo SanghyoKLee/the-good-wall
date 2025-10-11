@@ -8,6 +8,23 @@ export default function InstaSetup() {
   const [message, setMessage] = useState<string | null>(null);
   const [user, setUser] = useState("hello.innogoods");
   const [testResult, setTestResult] = useState<string | null>(null);
+  async function safeFetchJson(url: string, init?: RequestInit) {
+    const res = await fetch(url, { cache: "no-store", ...init });
+    const text = await res.text();
+    try {
+      const data = JSON.parse(text);
+      if (!res.ok)
+        throw new Error((data as any)?.error || `HTTP ${res.status}`);
+      return data;
+    } catch {
+      throw new Error(
+        `Non-JSON response (HTTP ${res.status}). Body preview: ${text.slice(
+          0,
+          200
+        )}`
+      );
+    }
+  }
 
   async function saveSessionId(e: React.FormEvent) {
     e.preventDefault();
@@ -15,13 +32,12 @@ export default function InstaSetup() {
     setMessage(null);
     setTestResult(null);
     try {
-      const res = await fetch("/api/instagram/session", {
+      // use safeFetchJson so HTML error pages don't blow up
+      await safeFetchJson("/api/instagram/session", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sessionId, maxAgeDays: 30 }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
+        body: JSON.stringify({ sessionId, maxAgeDays: 60 }),
+      } as RequestInit);
       setMessage("Saved. (Cookie set for this browser/session host.)");
       setSessionId("");
     } catch (err: any) {
@@ -34,13 +50,10 @@ export default function InstaSetup() {
   async function testScrape() {
     setTestResult("Testing…");
     try {
-      const res = await fetch(
-        `/api/instagram/scrape?user=${encodeURIComponent(user)}&debug=1`,
-        { cache: "no-store" }
+      const data = await safeFetchJson(
+        `/api/instagram/scrape?user=${encodeURIComponent(user)}&debug=1`
       );
-      const data = await res.json();
-      if (!res.ok || data.error)
-        throw new Error(data.error || `HTTP ${res.status}`);
+      if ((data as any)?.error) throw new Error((data as any).error);
       setTestResult(
         `OK: found ${data.count} image(s). Sample: ${JSON.stringify(
           data.sample || []

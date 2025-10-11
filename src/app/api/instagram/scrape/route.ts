@@ -1,5 +1,7 @@
 // app/api/instagram/scrape/route.ts
 export const runtime = "nodejs";
+export const maxDuration = 20;
+export const preferredRegion = "iad1";
 
 import { NextRequest, NextResponse } from "next/server";
 import chromium from "@sparticuz/chromium";

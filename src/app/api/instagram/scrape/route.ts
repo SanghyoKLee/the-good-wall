@@ -1,27 +1,21 @@
 // app/api/instagram/scrape/route.ts
 export const runtime = "nodejs";
-export const maxDuration = 20; // Vercel limit for this fn
-export const preferredRegion = "iad1"; // pick a close region
-export const dynamic = "force-dynamic"; // avoid any static optimization
+export const maxDuration = 20;
+export const preferredRegion = "iad1";
+export const dynamic = "force-dynamic";
 
 import { NextRequest, NextResponse } from "next/server";
 import chromium from "@sparticuz/chromium";
+import path from "path";
 
-chromium.setGraphicsMode = false;
+(chromium as any).setBrotliPath?.(
+  path.join(process.cwd(), "node_modules", "@sparticuz", "chromium", "bin")
+);
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-async function getPuppeteer() {
-  if (process.env.VERCEL) {
-    const p = await import("puppeteer-core");
-    return p.default ?? p;
-  }
-  const p = await import("puppeteer");
-  return p.default ?? p;
-}
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
@@ -29,41 +23,42 @@ export async function GET(req: NextRequest) {
     .replace("@", "")
     .trim();
   const maxImages = Number(searchParams.get("max") || 20);
-  const debug = searchParams.get("debug") === "1";
   const diag = searchParams.get("diag") === "1";
-
-  if (!user) {
+  if (!user)
     return NextResponse.json({ error: "Missing username" }, { status: 400 });
-  }
 
-  // prefer cookie set via /api/instagram/session; fallback to env var
   const cookieSession = req.cookies.get("IG_SESSIONID")?.value;
   const IG_SESSIONID = cookieSession || process.env.IG_SESSIONID || "";
-
   const url = `https://www.instagram.com/${encodeURIComponent(user)}/tagged/`;
-
   const isServerless = !!process.env.VERCEL;
 
   let stage = "import puppeteer";
   let browser: any;
 
   try {
-    const puppeteer = await getPuppeteer();
+    const puppeteer = await (isServerless
+      ? import("puppeteer-core").then((m) => m.default ?? m)
+      : import("puppeteer").then((m) => m.default ?? m));
 
     stage = "launch browser";
-    const launchOptions = {
-      headless: true,
-      args: isServerless
-        ? await chromium.args
-        : ["--no-sandbox", "--disable-setuid-sandbox"],
-      executablePath: isServerless
-        ? await chromium.executablePath()
-        : undefined,
-      defaultViewport: { width: 1280, height: 900 },
-    } as const;
+    let launchOptions: any; // or a proper LaunchOptions type if you prefer
 
-    browser = await puppeteer.launch(launchOptions);
+    if (process.env.VERCEL) {
+      launchOptions = {
+        args: chromium.args, // <- no await
+        executablePath: await chromium.executablePath(),
+        headless: true,
+        defaultViewport: { width: 1280, height: 900 },
+      };
+    } else {
+      launchOptions = {
+        headless: true,
+        args: ["--no-sandbox", "--disable-setuid-sandbox"], // <- mutable array
+        defaultViewport: { width: 1280, height: 900 },
+      };
+    }
 
+    const browser = await puppeteer.launch(launchOptions);
     stage = "new page";
     const page = await browser.newPage();
 
@@ -87,7 +82,6 @@ export async function GET(req: NextRequest) {
     await page
       .goto(url, { waitUntil: "networkidle2", timeout: 60000 })
       .catch(async () => {
-        // fallback if networkidle2 is too strict on serverless
         await page.waitForSelector("body", { timeout: 15000 });
       });
 
@@ -155,7 +149,6 @@ export async function GET(req: NextRequest) {
 
     const images = Array.from(collected).slice(0, maxImages);
 
-    // Optional inline diagnostics
     if (diag) {
       return NextResponse.json({
         diag: true,
@@ -172,7 +165,6 @@ export async function GET(req: NextRequest) {
 
     return NextResponse.json({ user, count: images.length, images });
   } catch (e: any) {
-    // Log stage + error to Vercel function logs
     console.error("[/api/instagram/scrape] FAILED at stage:", stage, e);
     return NextResponse.json(
       { error: `Failed at stage "${stage}": ${String(e?.message || e)}` },

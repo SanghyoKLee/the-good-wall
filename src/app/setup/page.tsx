@@ -6,7 +6,7 @@ export default function InstaSetup() {
   const [sessionId, setSessionId] = useState("");
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [user, setUser] = useState("hello.innogoods"); // change default if you like
+  const [user, setUser] = useState("hello.innogoods");
   const [testResult, setTestResult] = useState<string | null>(null);
 
   async function saveSessionId(e: React.FormEvent) {

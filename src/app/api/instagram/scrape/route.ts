@@ -1,48 +1,56 @@
+// app/api/instagram/scrape/route.ts
 export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
-import puppeteer from "puppeteer";
+import chromium from "@sparticuz/chromium";
 
-const DEFAULT_IG_USER = process.env.IG_USER || "hello.innogoods";
+chromium.setGraphicsMode = false;
+
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-function uniq<T>(arr: T[]) {
-  const s = new Set<T>();
-  const out: T[] = [];
-  for (const x of arr)
-    if (!s.has(x)) {
-      s.add(x);
-      out.push(x);
-    }
-  return out;
+// 👇 helper: pick puppeteer lib depending on environment
+async function getPuppeteer() {
+  if (process.env.VERCEL) {
+    const p = await import("puppeteer-core");
+    return p.default ?? p;
+  } else {
+    const p = await import("puppeteer");
+    return p.default ?? p;
+  }
 }
 
 export async function GET(req: NextRequest) {
-  const { searchParams, pathname } = new URL(req.url);
-  const user = (searchParams.get("user") || DEFAULT_IG_USER)
+  const { searchParams } = new URL(req.url);
+  const user = (searchParams.get("user") || "hello.innogoods")
     .replace("@", "")
     .trim();
-  const debug = searchParams.get("debug") === "1";
-  const maxImages = Number(searchParams.get("max") || 35);
+  const maxImages = Number(searchParams.get("max") || 20);
   if (!user)
     return NextResponse.json({ error: "Missing username" }, { status: 400 });
 
-  // 1) Prefer cookie set via /api/instagram/session; fallback to env var
   const cookieSession = req.cookies.get("IG_SESSIONID")?.value;
   const IG_SESSIONID = cookieSession || process.env.IG_SESSIONID || "";
 
-  const url = `https://www.instagram.com/${encodeURIComponent(user)}/tagged/`;
+  const puppeteer = await getPuppeteer();
 
-  let browser: import("puppeteer").Browser | undefined;
+  // 👇 choose executable + args for each env
+  const isServerless = !!process.env.VERCEL;
+  const launchOptions = {
+    headless: true,
+    // @sparticuz/chromium provides the right flags for Lambda
+    args: isServerless
+      ? await chromium.args
+      : ["--no-sandbox", "--disable-setuid-sandbox"],
+    executablePath: isServerless ? await chromium.executablePath() : undefined,
+    defaultViewport: { width: 1280, height: 900 },
+  } as const;
+
+  let browser: any;
   try {
-    browser = await puppeteer.launch({
-      headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox"],
-      defaultViewport: { width: 1280, height: 900 },
-    });
-
+    browser = await puppeteer.launch(launchOptions);
     const page = await browser.newPage();
     await page.setUserAgent(UA);
 
@@ -58,49 +66,40 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
+    const url = `https://www.instagram.com/${encodeURIComponent(user)}/tagged/`;
+    await page
+      .goto(url, { waitUntil: "networkidle2", timeout: 60000 })
+      .catch(async () => {
+        // fallback if networkidle2 is too strict on serverless
+        await page.waitForSelector("body", { timeout: 15000 });
+      });
 
-    try {
-      await page.evaluate(() => {
-        const clickByText = (regexes: RegExp[]) => {
-          const btns = Array.from(
-            document.querySelectorAll<HTMLButtonElement>("button")
-          );
-          for (const b of btns) {
-            const t = (b.textContent || "").trim();
-            for (const re of regexes)
-              if (re.test(t)) {
-                b.click();
-                return true;
-              }
-          }
-          const links = Array.from(
-            document.querySelectorAll<HTMLAnchorElement>("a")
-          );
-          for (const a of links) {
-            const t = (a.textContent || "").trim();
-            for (const re of regexes)
-              if (re.test(t)) {
-                a.click();
-                return true;
-              }
+    // try to dismiss cookie/consent
+    await page
+      .evaluate(() => {
+        const clickByText = (res: RegExp[]) => {
+          for (const el of Array.from(document.querySelectorAll("button,a"))) {
+            const t = (el.textContent || "").trim();
+            if (res.some((r) => r.test(t))) {
+              (el as HTMLElement).click();
+              return true;
+            }
           }
           return false;
         };
         clickByText([
           /allow all cookies/i,
-          /allow all/i,
           /accept all/i,
           /accept/i,
           /agree/i,
           /ok/i,
         ]);
-      });
-    } catch {}
+      })
+      .catch(() => {});
 
-    // Scroll & collect only real scontent images
+    // scroll + collect
     const collected = new Set<string>();
-    for (let i = 0; i < 12; i++) {
+    for (let i = 0; i < 12 && collected.size < maxImages; i++) {
       const batch: string[] = await page.evaluate(() => {
         const urls = new Set<string>();
         document
@@ -108,17 +107,15 @@ export async function GET(req: NextRequest) {
             "img[src^='https://scontent-'], img[srcset*='scontent-']"
           )
           .forEach((img) => {
-            const candidates: string[] = [];
-            if (img.currentSrc) candidates.push(img.currentSrc);
-            if (img.src) candidates.push(img.src);
-            const srcset = img.getAttribute("srcset") || "";
-            if (srcset) {
-              for (const part of srcset.split(",")) {
-                const u = part.trim().split(" ")[0];
-                if (u) candidates.push(u);
-              }
+            const cands: string[] = [];
+            if (img.currentSrc) cands.push(img.currentSrc);
+            if (img.src) cands.push(img.src);
+            const ss = img.getAttribute("srcset") || "";
+            for (const part of ss.split(",")) {
+              const u = part.trim().split(" ")[0];
+              if (u) cands.push(u);
             }
-            for (const u of candidates) {
+            for (const u of cands) {
               if (
                 /^https:\/\/scontent-/.test(u) &&
                 /\.(jpg|jpeg|webp|png)(\?|$)/i.test(u)
@@ -130,30 +127,24 @@ export async function GET(req: NextRequest) {
         return Array.from(urls);
       });
 
-      batch.forEach((u) => collected.add(u));
-      if (collected.size >= maxImages) break;
+      for (const u of batch) {
+        if (collected.size >= maxImages) break;
+        collected.add(u);
+      }
 
       await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
-      await sleep(1100 + Math.random() * 400);
+      await sleep(900 + Math.random() * 350);
     }
 
-    const images = uniq(Array.from(collected)).slice(0, maxImages);
-
-    if (debug) {
-      return NextResponse.json({
-        user,
-        count: images.length,
-        sample: images.slice(0, 5),
-        hint: IG_SESSIONID
-          ? "Using saved session cookie"
-          : "No session cookie detected (public only)",
-      });
-    }
-
+    const images = Array.from(collected).slice(0, maxImages);
     return NextResponse.json({ user, count: images.length, images });
-  } catch (err: any) {
-    return NextResponse.json({ error: String(err) }, { status: 500 });
+  } catch (e: any) {
+    return NextResponse.json({ error: String(e) }, { status: 500 });
   } finally {
-    if (browser) await browser.close().catch(() => {});
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {}
+    }
   }
 }

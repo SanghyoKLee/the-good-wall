@@ -1,7 +1,8 @@
 // app/api/instagram/scrape/route.ts
 export const runtime = "nodejs";
-export const maxDuration = 20;
-export const preferredRegion = "iad1";
+export const maxDuration = 20; // Vercel limit for this fn
+export const preferredRegion = "iad1"; // pick a close region
+export const dynamic = "force-dynamic"; // avoid any static optimization
 
 import { NextRequest, NextResponse } from "next/server";
 import chromium from "@sparticuz/chromium";
@@ -13,15 +14,13 @@ const UA =
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-// 👇 helper: pick puppeteer lib depending on environment
 async function getPuppeteer() {
   if (process.env.VERCEL) {
     const p = await import("puppeteer-core");
     return p.default ?? p;
-  } else {
-    const p = await import("puppeteer");
-    return p.default ?? p;
   }
+  const p = await import("puppeteer");
+  return p.default ?? p;
 }
 
 export async function GET(req: NextRequest) {
@@ -30,32 +29,48 @@ export async function GET(req: NextRequest) {
     .replace("@", "")
     .trim();
   const maxImages = Number(searchParams.get("max") || 20);
-  if (!user)
-    return NextResponse.json({ error: "Missing username" }, { status: 400 });
+  const debug = searchParams.get("debug") === "1";
+  const diag = searchParams.get("diag") === "1";
 
+  if (!user) {
+    return NextResponse.json({ error: "Missing username" }, { status: 400 });
+  }
+
+  // prefer cookie set via /api/instagram/session; fallback to env var
   const cookieSession = req.cookies.get("IG_SESSIONID")?.value;
   const IG_SESSIONID = cookieSession || process.env.IG_SESSIONID || "";
 
-  const puppeteer = await getPuppeteer();
+  const url = `https://www.instagram.com/${encodeURIComponent(user)}/tagged/`;
 
-  // 👇 choose executable + args for each env
   const isServerless = !!process.env.VERCEL;
-  const launchOptions = {
-    headless: true,
-    // @sparticuz/chromium provides the right flags for Lambda
-    args: isServerless
-      ? await chromium.args
-      : ["--no-sandbox", "--disable-setuid-sandbox"],
-    executablePath: isServerless ? await chromium.executablePath() : undefined,
-    defaultViewport: { width: 1280, height: 900 },
-  } as const;
 
+  let stage = "import puppeteer";
   let browser: any;
+
   try {
+    const puppeteer = await getPuppeteer();
+
+    stage = "launch browser";
+    const launchOptions = {
+      headless: true,
+      args: isServerless
+        ? await chromium.args
+        : ["--no-sandbox", "--disable-setuid-sandbox"],
+      executablePath: isServerless
+        ? await chromium.executablePath()
+        : undefined,
+      defaultViewport: { width: 1280, height: 900 },
+    } as const;
+
     browser = await puppeteer.launch(launchOptions);
+
+    stage = "new page";
     const page = await browser.newPage();
+
+    stage = "set UA";
     await page.setUserAgent(UA);
 
+    stage = "set cookie";
     if (IG_SESSIONID) {
       await page.setCookie({
         name: "sessionid",
@@ -68,7 +83,7 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    const url = `https://www.instagram.com/${encodeURIComponent(user)}/tagged/`;
+    stage = "goto";
     await page
       .goto(url, { waitUntil: "networkidle2", timeout: 60000 })
       .catch(async () => {
@@ -76,7 +91,7 @@ export async function GET(req: NextRequest) {
         await page.waitForSelector("body", { timeout: 15000 });
       });
 
-    // try to dismiss cookie/consent
+    stage = "dismiss consent";
     await page
       .evaluate(() => {
         const clickByText = (res: RegExp[]) => {
@@ -99,7 +114,7 @@ export async function GET(req: NextRequest) {
       })
       .catch(() => {});
 
-    // scroll + collect
+    stage = "scroll & collect";
     const collected = new Set<string>();
     for (let i = 0; i < 12 && collected.size < maxImages; i++) {
       const batch: string[] = await page.evaluate(() => {
@@ -139,14 +154,33 @@ export async function GET(req: NextRequest) {
     }
 
     const images = Array.from(collected).slice(0, maxImages);
+
+    // Optional inline diagnostics
+    if (diag) {
+      return NextResponse.json({
+        diag: true,
+        isServerless,
+        execPath: isServerless
+          ? await chromium.executablePath()
+          : "local-chrome",
+        hasCookie: Boolean(IG_SESSIONID),
+        gotImages: images.length,
+        stageReached: stage,
+        url,
+      });
+    }
+
     return NextResponse.json({ user, count: images.length, images });
   } catch (e: any) {
-    return NextResponse.json({ error: String(e) }, { status: 500 });
+    // Log stage + error to Vercel function logs
+    console.error("[/api/instagram/scrape] FAILED at stage:", stage, e);
+    return NextResponse.json(
+      { error: `Failed at stage "${stage}": ${String(e?.message || e)}` },
+      { status: 500 }
+    );
   } finally {
-    if (browser) {
-      try {
-        await browser.close();
-      } catch {}
-    }
+    try {
+      if (browser) await browser.close();
+    } catch {}
   }
 }

@@ -22,7 +22,7 @@ export async function GET(req: NextRequest) {
   const user = (searchParams.get("user") || "hello.innogoods")
     .replace("@", "")
     .trim();
-  const maxMedia = Number(searchParams.get("max") || 12);
+  const maxMedia = Number(searchParams.get("max") || 9);
   const diag = searchParams.get("diag") === "1";
   if (!user)
     return NextResponse.json({ error: "Missing username" }, { status: 400 });
@@ -45,7 +45,14 @@ export async function GET(req: NextRequest) {
 
     if (process.env.VERCEL) {
       launchOptions = {
-        args: chromium.args, // <- no await
+        args: [
+          ...chromium.args,
+          "--disable-dev-shm-usage", // Overcome limited resource problems
+          "--disable-gpu",
+          "--single-process", // Run in single process to save memory
+          "--no-zygote",
+          "--disable-setuid-sandbox",
+        ],
         executablePath: await chromium.executablePath(),
         headless: true,
         defaultViewport: { width: 1280, height: 900 },
@@ -61,6 +68,18 @@ export async function GET(req: NextRequest) {
     const browser = await puppeteer.launch(launchOptions);
     stage = "new page";
     const page = await browser.newPage();
+
+    // Disable unnecessary resources to save memory
+    await page.setRequestInterception(true);
+    page.on("request", (req) => {
+      const resourceType = req.resourceType();
+      // Block fonts, stylesheets, and other non-essential resources
+      if (["font", "stylesheet", "media"].includes(resourceType)) {
+        req.abort();
+      } else {
+        req.continue();
+      }
+    });
 
     stage = "set UA";
     await page.setUserAgent(UA);

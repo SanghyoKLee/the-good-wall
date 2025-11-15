@@ -345,7 +345,12 @@ export async function GET(req: NextRequest) {
           }
 
           if (video?.src) {
-            return { type: "video" as const, url: video.src };
+            return {
+              type: "video" as const,
+              url: video.src,
+              width: 0,
+              height: 0,
+            };
           }
 
           // If no video element found, check meta tags for video URL
@@ -359,10 +364,12 @@ export async function GET(req: NextRequest) {
             return {
               type: "video" as const,
               url: metaVideoSecure || metaVideo || "",
+              width: 0,
+              height: 0,
             };
           }
 
-          // Look for image - try multiple selectors
+          // Look for image - try multiple selectors, but ONLY within article/main to avoid profile pics
           let img = document.querySelector(
             'article img[src*="scontent"]'
           ) as HTMLImageElement;
@@ -372,16 +379,46 @@ export async function GET(req: NextRequest) {
             ) as HTMLImageElement;
           }
           if (!img) {
-            // Last resort: find the largest scontent image
+            // Last resort: find the largest scontent image IN article/main containers
             const allImages = Array.from(
-              document.querySelectorAll('img[src*="scontent"]')
+              document.querySelectorAll(
+                'article img[src*="scontent"], main img[src*="scontent"]'
+              )
             ) as HTMLImageElement[];
-            if (allImages.length > 0) {
-              img = allImages[0];
+            // Filter out small images (profile pics are typically < 200px)
+            const largeImages = allImages.filter((i) => {
+              const w = i.naturalWidth || i.width || 0;
+              const h = i.naturalHeight || i.height || 0;
+              return w >= 320 && h >= 320; // Minimum size for actual post content
+            });
+            if (largeImages.length > 0) {
+              // Sort by size and take the largest
+              largeImages.sort((a, b) => {
+                const aSize =
+                  (a.naturalWidth || a.width) * (a.naturalHeight || a.height);
+                const bSize =
+                  (b.naturalWidth || b.width) * (b.naturalHeight || b.height);
+                return bSize - aSize;
+              });
+              img = largeImages[0];
             }
           }
 
           if (img) {
+            const imgWidth = img.naturalWidth || img.width || 0;
+            const imgHeight = img.naturalHeight || img.height || 0;
+
+            // Double-check size - reject if too small (profile pics)
+            if (imgWidth < 320 || imgHeight < 320) {
+              return {
+                type: null,
+                url: null,
+                width: imgWidth,
+                height: imgHeight,
+                reason: "too small",
+              };
+            }
+
             // Get the largest image from srcset
             const srcset = img.getAttribute("srcset") || "";
             if (srcset) {
@@ -392,16 +429,26 @@ export async function GET(req: NextRequest) {
               });
               parts.sort((a, b) => b.width - a.width);
               if (parts[0]?.url) {
-                return { type: "image" as const, url: parts[0].url };
+                return {
+                  type: "image" as const,
+                  url: parts[0].url,
+                  width: imgWidth,
+                  height: imgHeight,
+                };
               }
             }
 
             // Fallback to src
             if (img.src && img.src.includes("scontent")) {
-              return { type: "image" as const, url: img.src };
+              return {
+                type: "image" as const,
+                url: img.src,
+                width: imgWidth,
+                height: imgHeight,
+              };
             }
           }
-          return { type: null, url: null };
+          return { type: null, url: null, width: 0, height: 0 };
         });
 
         if (media && media.type) {
@@ -426,7 +473,7 @@ export async function GET(req: NextRequest) {
             console.log(
               `[scrape] ✓ ${media.type === "image" ? "Image" : "Video"} ${
                 collected.length
-              }/${maxMedia}`
+              }/${maxMedia} (${(media as any).width}x${(media as any).height})`
             );
           }
         } else if (expectedVideo && interceptedVideoUrl) {
@@ -434,6 +481,13 @@ export async function GET(req: NextRequest) {
           collected.push({ type: "video", url: interceptedVideoUrl });
           console.log(
             `[scrape] ✓ Video ${collected.length}/${maxMedia} (intercepted)`
+          );
+        } else {
+          // Debug: log why media was rejected
+          console.log(
+            `[scrape] ✗ Post ${i + 1}: No media found - ${
+              (media as any)?.reason || "unknown"
+            } (${(media as any)?.width}x${(media as any)?.height})`
           );
         }
       } catch (postError) {

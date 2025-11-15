@@ -119,12 +119,12 @@ export default function InstaSlideshow() {
           pointerEvents: "none",
         }}
       >
-        <div style={{ fontWeight: 600, fontSize: 25 }}>
+        <div style={{ fontWeight: 600, fontSize: 27 }}>
           Tag <span style={{ color: "#58a6ff" }}>@hello.innogoods</span> to be
           featured!
         </div>
         {images.length > 0 && (
-          <div style={{ opacity: 0.8 }}>
+          <div style={{ opacity: 0.5 }}>
             {idx + 1} / {images.length}
           </div>
         )}

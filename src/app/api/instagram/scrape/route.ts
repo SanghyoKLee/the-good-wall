@@ -17,6 +17,11 @@ const UA =
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+// Simple in-memory cache with TTL
+const cache = new Map<string, { data: any; expires: number }>();
+
+const CACHE_TTL = 25 * 60 * 1000; // 25 minutes (longer than 20min refresh for 50% cache hit rate)
+
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const user = (searchParams.get("user") || "hello.innogoods")
@@ -26,6 +31,20 @@ export async function GET(req: NextRequest) {
   const diag = searchParams.get("diag") === "1";
   if (!user)
     return NextResponse.json({ error: "Missing username" }, { status: 400 });
+
+  // Check cache first (skip for diagnostic requests)
+  if (!diag) {
+    const cacheKey = `${user}:${maxMedia}`;
+    const cached = cache.get(cacheKey);
+    if (cached && cached.expires > Date.now()) {
+      console.log(
+        `[scrape] Returning cached data for ${user} (${Math.round(
+          (cached.expires - Date.now()) / 1000
+        )}s remaining)`
+      );
+      return NextResponse.json(cached.data);
+    }
+  }
 
   const cookieSession = req.cookies.get("IG_SESSIONID")?.value;
   const IG_SESSIONID = cookieSession || process.env.IG_SESSIONID || "";
@@ -441,7 +460,26 @@ export async function GET(req: NextRequest) {
       });
     }
 
-    return NextResponse.json({ user, count: media.length, media });
+    const result = { user, count: media.length, media };
+
+    // Cache the result for 10 minutes
+    const cacheKey = `${user}:${maxMedia}`;
+    cache.set(cacheKey, {
+      data: result,
+      expires: Date.now() + CACHE_TTL,
+    });
+
+    // Clean up old cache entries (simple cleanup strategy)
+    if (cache.size > 50) {
+      const now = Date.now();
+      for (const [key, value] of cache.entries()) {
+        if (value.expires < now) {
+          cache.delete(key);
+        }
+      }
+    }
+
+    return NextResponse.json(result);
   } catch (e: any) {
     console.error("[/api/instagram/scrape] FAILED at stage:", stage, e);
     return NextResponse.json(

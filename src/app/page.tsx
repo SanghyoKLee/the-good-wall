@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 
 const SLIDE_MS = 9000;
-const REFRESH_MIN = 5;
+const REFRESH_MIN = 20;
 
 type Media = {
   type: "image" | "video";

@@ -79,15 +79,27 @@ export async function GET(req: NextRequest) {
     }
 
     stage = "goto";
-    await page
-      .goto(url, { waitUntil: "networkidle2", timeout: 60000 })
-      .catch(async () => {
-        await page.waitForSelector("body", { timeout: 15000 });
+    try {
+      await page.goto(url, {
+        waitUntil: "domcontentloaded",
+        timeout: 30000,
       });
+      // Wait a bit for initial content to load
+      await sleep(2000);
+    } catch (navError) {
+      console.warn("[scrape] Navigation warning:", navError);
+      // If navigation fails, wait for body as fallback
+      try {
+        await page.waitForSelector("body", { timeout: 10000 });
+      } catch {
+        throw new Error("Page failed to load");
+      }
+    }
 
     stage = "dismiss consent";
-    await page
-      .evaluate(() => {
+    await sleep(1000);
+    try {
+      await page.evaluate(() => {
         const clickByText = (res: RegExp[]) => {
           for (const el of Array.from(document.querySelectorAll("button,a"))) {
             const t = (el.textContent || "").trim();
@@ -105,46 +117,55 @@ export async function GET(req: NextRequest) {
           /agree/i,
           /ok/i,
         ]);
-      })
-      .catch(() => {});
+      });
+      await sleep(1000);
+    } catch (consentError) {
+      console.warn("[scrape] Consent dialog handling skipped:", consentError);
+    }
 
     stage = "scroll & collect";
     const collected = new Set<string>();
     for (let i = 0; i < 12 && collected.size < maxImages; i++) {
-      const batch: string[] = await page.evaluate(() => {
-        const urls = new Set<string>();
-        document
-          .querySelectorAll<HTMLImageElement>(
-            "img[src^='https://scontent-'], img[srcset*='scontent-']"
-          )
-          .forEach((img) => {
-            const cands: string[] = [];
-            if (img.currentSrc) cands.push(img.currentSrc);
-            if (img.src) cands.push(img.src);
-            const ss = img.getAttribute("srcset") || "";
-            for (const part of ss.split(",")) {
-              const u = part.trim().split(" ")[0];
-              if (u) cands.push(u);
-            }
-            for (const u of cands) {
-              if (
-                /^https:\/\/scontent-/.test(u) &&
-                /\.(jpg|jpeg|webp|png)(\?|$)/i.test(u)
-              ) {
-                urls.add(u);
+      try {
+        const batch: string[] = await page.evaluate(() => {
+          const urls = new Set<string>();
+          document
+            .querySelectorAll<HTMLImageElement>(
+              "img[src^='https://scontent-'], img[srcset*='scontent-']"
+            )
+            .forEach((img) => {
+              const cands: string[] = [];
+              if (img.currentSrc) cands.push(img.currentSrc);
+              if (img.src) cands.push(img.src);
+              const ss = img.getAttribute("srcset") || "";
+              for (const part of ss.split(",")) {
+                const u = part.trim().split(" ")[0];
+                if (u) cands.push(u);
               }
-            }
-          });
-        return Array.from(urls);
-      });
+              for (const u of cands) {
+                if (
+                  /^https:\/\/scontent-/.test(u) &&
+                  /\.(jpg|jpeg|webp|png)(\?|$)/i.test(u)
+                ) {
+                  urls.add(u);
+                }
+              }
+            });
+          return Array.from(urls);
+        });
 
-      for (const u of batch) {
-        if (collected.size >= maxImages) break;
-        collected.add(u);
+        for (const u of batch) {
+          if (collected.size >= maxImages) break;
+          collected.add(u);
+        }
+
+        await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
+        await sleep(900 + Math.random() * 350);
+      } catch (scrollError) {
+        console.warn("[scrape] Scroll iteration error:", scrollError);
+        // If we hit an error during scrolling, break out but return what we have
+        break;
       }
-
-      await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
-      await sleep(900 + Math.random() * 350);
     }
 
     const images = Array.from(collected).slice(0, maxImages);

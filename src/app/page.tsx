@@ -54,14 +54,6 @@ export default function InstaSlideshow() {
         url: `/api/instagram/proxy?url=${encodeURIComponent(item.url)}`,
       }));
 
-      console.log(
-        `Loaded ${proxiedMedia.length} media items:`,
-        proxiedMedia.map((m) => ({
-          type: m.type,
-          url: m.url.slice(0, 100),
-        }))
-      );
-
       setMediaItems(proxiedMedia);
       setUsername(data.user || queryUser);
       // Don't reset to 0 if we already have media - keep showing current position
@@ -159,12 +151,6 @@ export default function InstaSlideshow() {
                 console.error("Video error:", currentMedia.url, e);
                 setIdx((i) => (i + 1) % mediaItems.length);
               }}
-              onLoadedData={() =>
-                console.log("Video loaded:", currentMedia.url)
-              }
-              onLoadStart={() =>
-                console.log("Video loading:", currentMedia.url)
-              }
             />
           )}
         </>

@@ -1,6 +1,6 @@
 // app/api/instagram/scrape/route.ts
 export const runtime = "nodejs";
-export const maxDuration = 20;
+export const maxDuration = 60; // Increase to 60 seconds for Vercel
 export const preferredRegion = "iad1";
 export const dynamic = "force-dynamic";
 
@@ -22,7 +22,7 @@ export async function GET(req: NextRequest) {
   const user = (searchParams.get("user") || "hello.innogoods")
     .replace("@", "")
     .trim();
-  const maxMedia = Number(searchParams.get("max") || 20);
+  const maxMedia = Number(searchParams.get("max") || 12);
   const diag = searchParams.get("diag") === "1";
   if (!user)
     return NextResponse.json({ error: "Missing username" }, { status: 400 });
@@ -81,16 +81,17 @@ export async function GET(req: NextRequest) {
     stage = "goto";
     try {
       await page.goto(url, {
-        waitUntil: "domcontentloaded",
+        waitUntil: "domcontentloaded", // Faster than networkidle0
         timeout: 30000,
       });
-      // Wait a bit for initial content to load
-      await sleep(2000);
+      // Shorter wait for serverless
+      await sleep(isServerless ? 800 : 1500);
     } catch (navError) {
       console.warn("[scrape] Navigation warning:", navError);
       // If navigation fails, wait for body as fallback
       try {
         await page.waitForSelector("body", { timeout: 10000 });
+        await sleep(1000);
       } catch {
         throw new Error("Page failed to load");
       }
@@ -129,24 +130,15 @@ export async function GET(req: NextRequest) {
 
     // Check if we're actually on the tagged page
     const currentUrl = await page.url();
-    console.log(`[scrape] Current URL: ${currentUrl}`);
 
     // Wait for content to load
-    await sleep(1000);
-
-    // Check if there's a "No Posts Yet" or similar message
-    const pageInfo = await page.evaluate(() => {
-      const bodyText = document.body.innerText;
-      const hasNoPosts = /no posts yet|nothing to see here/i.test(bodyText);
-      const postCount = document.querySelectorAll('a[href*="/p/"]').length;
-      return { hasNoPosts, postCount, url: window.location.href };
-    });
-
-    console.log(`[scrape] Page info:`, pageInfo);
+    await sleep(800);
 
     // First, collect post links from the tagged grid
     // We need to find only posts that are IN the grid, not just any post link on the page
-    for (let i = 0; i < 6 && postLinks.length < maxMedia; i++) {
+    // Reduce iterations for serverless environment
+    const scrollIterations = isServerless ? 3 : 6;
+    for (let i = 0; i < scrollIterations && postLinks.length < maxMedia; i++) {
       const links = await page.evaluate(() => {
         const urls: { url: string; isVideo: boolean }[] = [];
 
@@ -200,12 +192,6 @@ export async function GET(req: NextRequest) {
         return urls;
       });
 
-      console.log(
-        `[scrape] Scroll ${i + 1}: found ${links.length} post links (${
-          links.filter((l) => l.isVideo).length
-        } videos, ${links.filter((l) => !l.isVideo).length} images)`
-      );
-
       for (const link of links) {
         if (postLinks.length >= maxMedia) break;
         if (!postLinks.some((p) => p.url === link.url)) {
@@ -216,28 +202,23 @@ export async function GET(req: NextRequest) {
       if (postLinks.length >= maxMedia) break;
 
       await page.evaluate(() => window.scrollBy(0, window.innerHeight * 2));
-      await sleep(1000);
+      await sleep(800);
     }
 
-    console.log(
-      `[scrape] Found ${postLinks.length} tagged posts (${
-        postLinks.filter((p) => p.isVideo).length
-      } marked as videos)`
-    );
+    console.log(`[scrape] Found ${postLinks.length} tagged posts`);
 
     // If we didn't find any posts, the tagged section might be private or empty
     if (postLinks.length === 0) {
       console.warn(
         "[scrape] No posts found in tagged section - may be private or empty"
       );
-      // Try to get any error messages from the page
-      const pageText = await page.evaluate(() => document.body.innerText);
-      console.log("[scrape] Page content preview:", pageText.slice(0, 500));
     }
 
     // Now visit each post to extract media
     for (let i = 0; i < Math.min(postLinks.length, maxMedia); i++) {
       if (collected.length >= maxMedia) break;
+
+      console.log(`[scrape] Processing post ${i + 1}/${postLinks.length}`);
 
       const postLink = postLinks[i];
       const postUrl = postLink.url;
@@ -272,101 +253,37 @@ export async function GET(req: NextRequest) {
                   .join("&");
 
               interceptedVideoUrl = cleanUrl;
-              console.log(
-                `[scrape] Post ${i + 1} intercepted video URL: ${cleanUrl.slice(
-                  0,
-                  100
-                )}...`
-              );
             }
           });
         }
 
         await page.goto(postUrl, {
-          waitUntil: "domcontentloaded",
+          waitUntil: "domcontentloaded", // Faster than networkidle0
           timeout: 15000,
         });
 
-        // Wait longer for videos to load - they're lazy-loaded
-        await sleep(1000);
+        // Shorter wait times for serverless
+        await sleep(isServerless ? 500 : 800);
 
-        // Check metadata to see if this is actually a video post
-        const pageMetadata = await page.evaluate(() => {
-          const metaType = document
-            .querySelector('meta[property="og:type"]')
-            ?.getAttribute("content");
-          const metaVideoUrl = document
-            .querySelector('meta[property="og:video"]')
-            ?.getAttribute("content");
-          const metaVideoSecure = document
-            .querySelector('meta[property="og:video:secure_url"]')
-            ?.getAttribute("content");
-          return { metaType, metaVideoUrl, metaVideoSecure };
-        });
-
-        if (i === 10 || i === 11) {
-          console.log(
-            `[scrape] Post ${i + 1} (${postUrl}) metadata:`,
-            pageMetadata
-          );
-
-          // For these specific posts, let's dump the entire page HTML to see what we're dealing with
-          const pageHtml = await page.content();
-          const hasVideoTag = pageHtml.includes("<video");
-          const hasSourceTag = pageHtml.includes("<source");
-          const videoMatches = pageHtml.match(/<video[^>]*>/g);
-          const sourceMatches = pageHtml.match(/<source[^>]*>/g);
-
-          console.log(`[scrape] Post ${i + 1} HTML analysis:`, {
-            hasVideoTag,
-            hasSourceTag,
-            videoMatches: videoMatches?.length || 0,
-            sourceMatches: sourceMatches?.length || 0,
-            firstVideoTag: videoMatches?.[0] || "none",
-            firstSourceTag: sourceMatches?.[0] || "none",
-          });
-        }
-
-        // Wait for video element to appear (up to 5 seconds)
-        try {
-          await page.waitForSelector("video", { timeout: 5000 });
-          console.log(`[scrape] Post ${i + 1} - video element found!`);
-          await sleep(1000); // Wait for src to load
-        } catch (videoWaitErr) {
-          // No video element appeared
-          if (i === 10 || i === 11) {
-            console.log(
-              `[scrape] Post ${i + 1} - NO video element found after 5s wait`
-            );
+        // Only wait for video element if we expect a video (saves 3-5s on image posts!)
+        if (expectedVideo) {
+          try {
+            await page.waitForSelector("video", {
+              timeout: isServerless ? 2000 : 3000,
+            });
+            await sleep(isServerless ? 300 : 500); // Wait for src to load
+          } catch (videoWaitErr) {
+            // No video element appeared
           }
         }
 
-        // Try to scroll to trigger video loading
-        await page.evaluate(() => window.scrollBy(0, 200));
-        await sleep(500);
+        // Try to scroll to trigger video loading (only if video expected)
+        if (expectedVideo) {
+          await page.evaluate(() => window.scrollBy(0, 200));
+          await sleep(300);
+        }
 
         const media = await page.evaluate(() => {
-          // Debug: log what we find
-          const debug = {
-            videos: document.querySelectorAll("video").length,
-            videoWithSrc: document.querySelectorAll("video[src]").length,
-            articleVideos: document.querySelectorAll("article video").length,
-            mainVideos: document.querySelectorAll("main video").length,
-            images: document.querySelectorAll("img").length,
-            imagesWithScontent: document.querySelectorAll(
-              'img[src*="scontent"]'
-            ).length,
-            articleImages: document.querySelectorAll("article img").length,
-            mainImages: document.querySelectorAll('main img[src*="scontent"]')
-              .length,
-            // Check for video indicators
-            playButtons: document.querySelectorAll(
-              '[aria-label*="play" i], [aria-label*="video" i]'
-            ).length,
-            svgPlayIcons: document.querySelectorAll('svg[aria-label*="play" i]')
-              .length,
-          };
-
           // First check for video (try multiple selectors)
           let video = document.querySelector(
             "article video[src]"
@@ -390,7 +307,7 @@ export async function GET(req: NextRequest) {
           }
 
           if (video?.src) {
-            return { type: "video" as const, url: video.src, debug };
+            return { type: "video" as const, url: video.src };
           }
 
           // If no video element found, check meta tags for video URL
@@ -404,7 +321,6 @@ export async function GET(req: NextRequest) {
             return {
               type: "video" as const,
               url: metaVideoSecure || metaVideo || "",
-              debug: { ...debug, foundInMeta: true },
             };
           }
 
@@ -438,66 +354,49 @@ export async function GET(req: NextRequest) {
               });
               parts.sort((a, b) => b.width - a.width);
               if (parts[0]?.url) {
-                return { type: "image" as const, url: parts[0].url, debug };
+                return { type: "image" as const, url: parts[0].url };
               }
             }
 
             // Fallback to src
             if (img.src && img.src.includes("scontent")) {
-              return { type: "image" as const, url: img.src, debug };
+              return { type: "image" as const, url: img.src };
             }
           }
-          return { type: null, url: null, debug };
+          return { type: null, url: null };
         });
 
         if (media && media.type) {
-          console.log(`[scrape] Post ${i + 1} debug:`, media.debug);
-
           // If we intercepted a video URL and this is a reel, ALWAYS use the intercepted URL
           if (expectedVideo && interceptedVideoUrl) {
-            console.log(`[scrape] Post ${i + 1} - using intercepted video URL`);
             collected.push({ type: "video", url: interceptedVideoUrl });
-            console.log(
-              `[scrape] Collected video ${collected.length}/${maxMedia}`
-            );
+            console.log(`[scrape] ✓ Video ${collected.length}/${maxMedia}`);
           } else if (media.type === "video" && media.url.startsWith("blob:")) {
             // Skip blob URLs - we can't use them
-            console.warn(
-              `[scrape] Post ${
-                i + 1
-              } - skipping blob video URL (no CDN URL intercepted)`
-            );
+            console.log(`[scrape] ✗ Skipped blob video`);
           } else {
             // For images, filter out thumbnails
             if (
               media.type === "image" &&
               /\/(s150x150|s320x320|s240x240)/.test(media.url)
             ) {
-              console.log(`[scrape] Skipping thumbnail for post ${i + 1}`);
+              console.log(`[scrape] ✗ Skipped thumbnail`);
               continue;
             }
 
             collected.push({ type: media.type, url: media.url });
             console.log(
-              `[scrape] Collected ${media.type} ${collected.length}/${maxMedia}`
+              `[scrape] ✓ ${media.type === "image" ? "Image" : "Video"} ${
+                collected.length
+              }/${maxMedia}`
             );
           }
         } else if (expectedVideo && interceptedVideoUrl) {
           // We expected a video and intercepted one, even though DOM parsing failed
-          console.log(
-            `[scrape] Post ${
-              i + 1
-            } - using intercepted video URL (no DOM media found)`
-          );
           collected.push({ type: "video", url: interceptedVideoUrl });
           console.log(
-            `[scrape] Collected video ${collected.length}/${maxMedia}`
+            `[scrape] ✓ Video ${collected.length}/${maxMedia} (intercepted)`
           );
-        } else {
-          console.warn(`[scrape] No media found in post ${i + 1}: ${postUrl}`);
-          if (media) {
-            console.log(`[scrape] Post ${i + 1} debug:`, media.debug);
-          }
         }
       } catch (postError) {
         console.warn(`[scrape] Failed to load post ${i + 1}:`, postError);
@@ -507,7 +406,7 @@ export async function GET(req: NextRequest) {
 
     const media = collected.slice(0, maxMedia);
 
-    console.log(`[scrape] Returning ${media.length} media items`);
+    console.log(`[scrape] Completed: ${media.length} media items collected`);
 
     if (diag) {
       return NextResponse.json({

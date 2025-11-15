@@ -174,8 +174,7 @@ export async function GET(req: NextRequest) {
 
     // First, collect post links from the tagged grid
     // We need to find only posts that are IN the grid, not just any post link on the page
-    // Reduce iterations for serverless environment
-    const scrollIterations = isServerless ? 3 : 6;
+    const scrollIterations = 4;
     for (let i = 0; i < scrollIterations && postLinks.length < maxMedia; i++) {
       const links = await page.evaluate(() => {
         const urls: { url: string; isVideo: boolean }[] = [];
@@ -303,6 +302,20 @@ export async function GET(req: NextRequest) {
         // Shorter wait times for serverless
         await sleep(isServerless ? 500 : 800);
 
+        // Wait for images to fully load before extracting
+        try {
+          await page.waitForSelector(
+            'article img[src*="scontent"], main img[src*="scontent"]',
+            {
+              timeout: 3000,
+            }
+          );
+          // Give images time to report their dimensions
+          await sleep(300);
+        } catch (imgWaitErr) {
+          // No images found, might be video-only post
+        }
+
         // Only wait for video element if we expect a video (saves 3-5s on image posts!)
         if (expectedVideo) {
           try {
@@ -408,7 +421,16 @@ export async function GET(req: NextRequest) {
             const imgWidth = img.naturalWidth || img.width || 0;
             const imgHeight = img.naturalHeight || img.height || 0;
 
-            // Double-check size - reject if too small (profile pics)
+            // Double-check size - reject if too small (profile pics) or dimensions not loaded
+            if (imgWidth === 0 || imgHeight === 0) {
+              return {
+                type: null,
+                url: null,
+                width: imgWidth,
+                height: imgHeight,
+                reason: "dimensions not loaded",
+              };
+            }
             if (imgWidth < 320 || imgHeight < 320) {
               return {
                 type: null,
